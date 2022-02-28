@@ -68,70 +68,15 @@
 */
 
 /*
-FreeRTOS is a market leading RTOS from Real Time Engineers Ltd. that supports
-31 architectures and receives 77500 downloads a year. It is professionally
-developed, strictly quality controlled, robust, supported, and free to use in
-commercial products without any requirement to expose your proprietary source
-code.
-
-This simple FreeRTOS demo does not make use of any IO ports, so will execute on
-any Cortex-M3 of Cortex-M4 hardware.  Look for TODO markers in the code for
-locations that may require tailoring to, for example, include a manufacturer
-specific header file.
-
-This is a starter project, so only a subset of the RTOS features are
-demonstrated.  Ample source comments are provided, along with web links to
-relevant pages on the http://www.FreeRTOS.org site.
-
-Here is a description of the project's functionality:
+This project simulates a traffic buildup at a traffic light. Here is a description of the project's functionality:
 
 The main() Function:
-main() creates the tasks and software timers described in this section, before
+main() performs initialization and the creates the tasks and software timers described in this section, before
 starting the scheduler.
 
-The Queue Send Task:
-The queue send task is implemented by the prvQueueSendTask() function.
-The task uses the FreeRTOS vTaskDelayUntil() and xQueueSend() API functions to
-periodically send the number 100 on a queue.  The period is set to 200ms.  See
-the comments in the function for more details.
-http://www.freertos.org/vtaskdelayuntil.html
-http://www.freertos.org/a00117.html
 
-The Queue Receive Task:
-The queue receive task is implemented by the prvQueueReceiveTask() function.
-The task uses the FreeRTOS xQueueReceive() API function to receive values from
-a queue.  The values received are those sent by the queue send task.  The queue
-receive task increments the ulCountOfItemsReceivedOnQueue variable each time it
-receives the value 100.  Therefore, as values are sent to the queue every 200ms,
-the value of ulCountOfItemsReceivedOnQueue will increase by 5 every second.
-http://www.freertos.org/a00118.html
 
-An example software timer:
-A software timer is created with an auto reloading period of 1000ms.  The
-timer's callback function increments the ulCountOfTimerCallbackExecutions
-variable each time it is called.  Therefore the value of
-ulCountOfTimerCallbackExecutions will count seconds.
-http://www.freertos.org/RTOS-software-timer.html
 
-The FreeRTOS RTOS tick hook (or callback) function:
-The tick hook function executes in the context of the FreeRTOS tick interrupt.
-The function 'gives' a semaphore every 500th time it executes.  The semaphore
-is used to synchronise with the event semaphore task, which is described next.
-
-The event semaphore task:
-The event semaphore task uses the FreeRTOS xSemaphoreTake() API function to
-wait for the semaphore that is given by the RTOS tick hook function.  The task
-increments the ulCountOfReceivedSemaphores variable each time the semaphore is
-received.  As the semaphore is given every 500ms (assuming a tick frequency of
-1KHz), the value of ulCountOfReceivedSemaphores will increase by 2 each second.
-
-The idle hook (or callback) function:
-The idle hook function queries the amount of free FreeRTOS heap space available.
-See vApplicationIdleHook().
-
-The malloc failed and stack overflow hook (or callback) functions:
-These two hook functions are provided as examples, but do not contain any
-functionality.
 */
 
 /* Standard includes. */
@@ -140,6 +85,7 @@ functionality.
 #include <stdlib.h>
 #include <time.h>
 #include "stm32f4_discovery.h"
+
 /* Kernel includes. */
 #include "stm32f4xx.h"
 #include "../FreeRTOS_Source/include/FreeRTOS.h"
@@ -148,28 +94,20 @@ functionality.
 #include "../FreeRTOS_Source/include/task.h"
 #include "../FreeRTOS_Source/include/timers.h"
 
-
-
 /*-----------------------------------------------------------*/
 #define mainQUEUE_LENGTH 100
 
-#define amber  	0
-#define green  	1
-#define red  	2
-#define blue  	3
+#define GREEN_LIGHT_PIN GPIO_Pin_0
+#define YELLOW_LIGHT_PIN GPIO_Pin_1
+#define RED_LIGHT_PIN GPIO_Pin_2
+#define ADC_PIN GPIO_Pin_3
 
-#define amber_led	LED3
-#define green_led	LED4
-#define red_led		LED5
-#define blue_led	LED6
-
-#define Reset_Pin	GPIO_Pin_8
 #define Data_Pin	GPIO_Pin_6
 #define Clock_Pin	GPIO_Pin_7
+#define Reset_Pin	GPIO_Pin_8
 
 #undef configUSE_TICK_HOOK
 #define configUSE_TICK_HOOK 1
-
 
 /*
  * TODO: Implement this function for any hardware specific clock configuration
@@ -178,173 +116,205 @@ functionality.
 static void prvSetupHardware( void );
 
 /*
- * The queue send and receive tasks as described in the comments at the top of
- * this file.
+ * Task declarations.
  */
 static void Potentiometer_Read_Task( void *pvParameters );
 static void Traffic_Generator_Task( void *pvParameters );
 static void Traffic_Light_State_Task( TimerHandle_t );
 static void System_Display_Task( void *pvParameters );
 
+/*
+ * Global queue handles.
+ */
 xQueueHandle xQueue_potentiometer = 0;
 xQueueHandle xQueue_traffic_light = 0;
 xQueueHandle xQueue_car_generation = 0;
+xTimerHandle xTimer_traffic_light_state = 0;
 
 
 /*-----------------------------------------------------------*/
+/*-------Function Definitions--------------------------------*/
+/*-----------------------------------------------------------*/
 
-void init(void){
-	//Step 1: Initialize GPIO
+int init(void){
+	GPIO_InitTypeDef gpio_traffic_light;
+	GPIO_InitTypeDef gpio_adc;
+	ADC_InitTypeDef adc_itd;
+	TimerHandle_t timer_handle;
 
 	//Enable Clock
 	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOC, ENABLE);
 
-
-	GPIO_InitTypeDef gpio_traffic_light;
-
+	//Configure GPIO traffic light pins
 	gpio_traffic_light.GPIO_Mode = GPIO_Mode_OUT;
 	gpio_traffic_light.GPIO_OType = GPIO_OType_PP;
-	gpio_traffic_light.GPIO_Pin = GPIO_Pin_0 | GPIO_Pin_1
-			| GPIO_Pin_2 | GPIO_Pin_6 | GPIO_Pin_7 | GPIO_Pin_8;
-
+	gpio_traffic_light.GPIO_Pin = 
+		GREEN_LIGHT_PIN | YELLOW_LIGHT_PIN | RED_LIGHT_PIN | Data_Pin | Clock_Pin | Reset_Pin;
 	gpio_traffic_light.GPIO_PuPd = GPIO_PuPd_DOWN;
 	gpio_traffic_light.GPIO_Speed = GPIO_Speed_100MHz;
-
-	//Set Gpio bits
-	GPIO_Init(GPIOC, &gpio_traffic_light);
-	GPIO_SetBits(GPIOC, GPIO_Pin_2);
-
-
-	GPIO_InitTypeDef gpio_adc;
-
+	
+	//Configure GPIO ADC pin
 	gpio_adc.GPIO_Mode = GPIO_Mode_AN;
-	//gpio_adc.GPIO_OType = GPIO_OType_PP;
-	gpio_adc.GPIO_Pin = GPIO_Pin_3;
+	gpio_adc.GPIO_Pin = ADC_PIN;
 	gpio_adc.GPIO_PuPd = GPIO_PuPd_NOPULL;
 	gpio_adc.GPIO_Speed = GPIO_Speed_100MHz;
 
-
+	//Initialize GPIOC for traffic light and ADC pins
+	GPIO_Init(GPIOC, &gpio_traffic_light);
 	GPIO_Init(GPIOC, &gpio_adc);
 
-	ADC_InitTypeDef adc_itd;
-
+	//Configure ADC
 	adc_itd.ADC_ContinuousConvMode = 0;
 	adc_itd.ADC_DataAlign = ADC_DataAlign_Right;
 	adc_itd.ADC_ExternalTrigConv = DISABLE;
-	//adc_itd.ADC_ExternalTrigConvEdge = ADC_ExternalTrigConvEdge_Falling;
-	//adc_itd.ADC_NbrOfConversion = 3;
 	adc_itd.ADC_Resolution = ADC_Resolution_10b;
-	//adc_itd.ADC_ScanConvMode = 0;
-
-	//Enable Clock
 	RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC1, ENABLE);
-	ADC_Init(ADC1, &adc_itd);
 
+	//Initialize ADC
+	ADC_Init(ADC1, &adc_itd);
 	ADC_RegularChannelConfig(ADC1, ADC_Channel_13, 1, ADC_SampleTime_3Cycles);
 
+	ADC_Cmd(ADC1, ENABLE);
+	ADC_SoftwareStartConv(ADC1);
+
+	/*//Create timer
+	TimerHandle_t timer_handle = xTimerCreate("Traffic Light Timer", 1000, pdTRUE, NULL, Traffic_Light_State_Task);
+	if(timer_handle == NULL) {
+		fprintf(stderr, "Timer not created\n");
+		return 1;
+	}
+
+	//Start timer
+	if(xTimerStart( timer_handle, 0 ) != pdPASS )
+	{
+		printf("The timer could not be set into the Active state.\n");
+		return 2;
+	}*/
+
+
+	//Provide seed for random number generator
 	time_t t;
 	srand((unsigned) time(&t));
+
+	return 0;
 }
 
 
 int main(void)
 {
-
-	init();
-
-	/* Initialize LEDs */
-	STM_EVAL_LEDInit(amber_led);
-	STM_EVAL_LEDInit(green_led);
-	STM_EVAL_LEDInit(red_led);
-	STM_EVAL_LEDInit(blue_led);
-
-	/* Configure the system ready to run the demo.  The clock configuration
-	can be done here if it was not done before main() was called. */
-	prvSetupHardware();
-
-	ADC_Cmd (ADC1, ENABLE);
-	ADC_SoftwareStartConv(ADC1);
-
-	/*Initialize timer*/
-	void * const pvTimerID = 0;
-	TimerHandle_t timer_handle = xTimerCreate("Traffic Light Timer", 1000, pdTRUE, pvTimerID, Traffic_Light_State_Task);
-	if( timer_handle == NULL) {
-		fprintf(stderr, "Timer not created\n");
+	//Initialize hardware
+	if(!init()){
+		printf("Hardware initialized\n");
+	}
+	else{
+		printf("Hardware initialization failed\n");
 		return 1;
 	}
 
-	/* Create the queue used by the queue send and queue receive tasks.
-	http://www.freertos.org/a00116.html */
-	xQueue_potentiometer = xQueueCreate( 	mainQUEUE_LENGTH,		/* The number of items the queue can hold. */
-							sizeof( uint16_t ) );	/* The size of each item the queue holds. */
+	prvSetupHardware();
 
-	xQueue_car_generation = xQueueCreate( 	mainQUEUE_LENGTH,		/* The number of items the queue can hold. */
-							sizeof( uint16_t ) );	/* The size of each item the queue holds. */
-	/* Add to the registry, for the benefit of kernel aware debugging. */
+	//Create queues
+	xQueue_potentiometer = xQueueCreate(mainQUEUE_LENGTH, sizeof(uint16_t));
+	xQueue_car_generation = xQueueCreate( 	mainQUEUE_LENGTH, sizeof(uint16_t));
+
+	//Create tasks
 	vQueueAddToRegistry( xQueue_potentiometer, "PotentiometerQueue" );
 	vQueueAddToRegistry( xQueue_car_generation, "CarGenerationQueue" );
 
+	//Create tasks
 	xTaskCreate( Potentiometer_Read_Task, "Potentiometer_Read", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
 	xTaskCreate( Traffic_Generator_Task, "Traffic_Generator", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
-	//xTaskCreate( Traffic_Light_State_Task, "Traffic_Light_State", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
 	xTaskCreate( System_Display_Task, "System_Display", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
 
-	/* Start the timer.  No block time is specified, and
-	 even if one was it would be ignored because the RTOS
-	 scheduler has not yet been started. */
-	 if( xTimerStart( timer_handle, 0 ) != pdPASS )
-	 {
-		 printf("The timer could not be set into the Active state.\n");
-		 return 2;
-	 }
+	xTimer_traffic_light_state = xTimerCreate("Traffic Light Timer", 1000, pdTRUE, NULL, Traffic_Light_State_Task);
+	xTimerStart(xTimer_traffic_light_state, 0);
 
-	/* Start the tasks and timer running. */
+	//Start the tasks and timer.
 	vTaskStartScheduler();
 
 	return 0;
 }
 
-/*-----------------------------------------------------------*/
+int traffic_light_is_green()
+{
+	return GPIO_ReadInputDataBit(GPIOC, GREEN_LIGHT_PIN);
+}
+
+int traffic_light_is_yellow()
+{
+	return GPIO_ReadInputDataBit(GPIOC, YELLOW_LIGHT_PIN);
+}
+
+int traffic_light_is_red()
+{
+	return GPIO_ReadInputDataBit(GPIOC, RED_LIGHT_PIN);
+}
+
+/*-----------------------------------------------------------
+/*
+ * Potentionmeter Read Task
+ * Description: Reads potentiometer value and puts it in queue, then sleeps for a half a second, and
+ * removes the value from the queue.
+ * Input: void *pvParameters - pointer to parameters
+ */
 
 static void Potentiometer_Read_Task( void *pvParameters )
 {
-	uint16_t adc_val;
-	uint16_t old_adc_val;
+	uint16_t adc_val, old_adc_val;
 	for(;;) {
 		ADC_SoftwareStartConv(ADC1);
 
 		while(!ADC_GetFlagStatus(ADC1, ADC_FLAG_EOC));
 
+		//Divide value by 10 so that it is in the range of 0-100
 		adc_val = ADC_GetConversionValue(ADC1) / 10;
 
 		//Pop old value of the queue
-		xQueueReceive(xQueue_potentiometer, &old_adc_val, 10);
-		//Send new adc value into the queue
+		xQueueReceive(xQueue_potentiometer, NULL, 10);
+
+		//Send new adc value into the queue (value not used)
 		xQueueSend(xQueue_potentiometer,&adc_val,1000);
 
+		//Sleep for half a second
 		vTaskDelay(pdMS_TO_TICKS(500));
 	}
 }
 
 
 /*-----------------------------------------------------------*/
-
+/*
+ * Traffic Generator Task
+ * Description: Reads potentiometer value from queue, and then uses that value in addition to a
+ * random number to determine whether a car should be generated. The higher the value of the 
+ * potentiometer, the more likely a car will be generated.
+ * Input: void *pvParameters - pointer to parameters
+ * Output: void
+ */
 static void  Traffic_Generator_Task( void *pvParameters )
 {
 	uint16_t potentiometer_val = 0;
-	while(1)
-	{
+	for(;;) {
+		//Read potentiometer value from queue
 		xQueuePeek(xQueue_potentiometer, &potentiometer_val, 1000);
+		
+		//Shift the potentiometer value up by 20 and scale so that max stays at 100
 		potentiometer_val += 20;
+		potentiometer_val = (int)((double)potentiometer_val/1.2);
+
+		//Generate random number between 0 and 100
 		int rand_val = (rand()*100.0) / RAND_MAX;
 		printf("rand: %d --- adc: %u \n", rand_val, potentiometer_val);
-		int new_car_val = 0;
+		
+		//If random number is greater than potentiometer value, generate car
+		//By sending a 1 to the queue, the car generation task will generate a car
+		//If random number is less than potentiometer value, do not generate car
+		//By sending a 0 to the queue, the car generation task will not generate a car
 		if(rand_val <= potentiometer_val) { //Create new car
 			//Send car to new queue
-			new_car_val = 1;
+			int new_car_val = 1;
 			xQueueSend(xQueue_car_generation, &new_car_val, 1000);
-			printf("Sending car\n");
 		} else{
+			int new_car_val = 0;
 			xQueueSend(xQueue_car_generation, &new_car_val, 1000);
 		}
 		vTaskDelay(pdMS_TO_TICKS(500));
@@ -353,101 +323,139 @@ static void  Traffic_Generator_Task( void *pvParameters )
 
 /*-----------------------------------------------------------*/
 
+/*
+ * Traffic Light State Task
+ * Description: Timer triggered task that changes the state of the traffic light when called.
+ * Modifies timer period based on potentiometer value and new traffic light state.
+ * Input: TimerHandle_t xTimer - timer handle
+ * Output: void
+ */
 void Traffic_Light_State_Task( TimerHandle_t xTimer ) {
 	uint16_t potentiometer_val = 0;
 
+	//Read potentiometer value from queue
 	xQueuePeek(xQueue_potentiometer, &potentiometer_val, 1000);
 
-	if(GPIO_ReadInputDataBit(GPIOC, GPIO_Pin_0)) { // traffic light is red
-		 //Set light to green
-		 GPIO_ResetBits(GPIOC, GPIO_Pin_0 | GPIO_Pin_1 | GPIO_Pin_2);
-		 GPIO_SetBits(GPIOC, GPIO_Pin_2);
+	//The period that the light is green should be proportional to the potentiometer value
+	//The period that the light is yellow should be constant
+	//The period that the light is red should be inversly proportional to the potentiometer value
+	//If the potentiometer value is 0, the red light should be on twice as long as the green light
+	//If the potentiometer value is 100, the green light should be on twice as long as the red light
 
-		 xTimerChangePeriod( xTimer, pdMS_TO_TICKS(15*(potentiometer_val+1)), 1000);
+	xTimerChangePeriod( xTimer, pdMS_TO_TICKS(ms_to_delay), 1000);
 
-		 //printf("Green\n");
-	}else if(GPIO_ReadInputDataBit(GPIOC, GPIO_Pin_1)) { // traffic light is yellow
-		 //Set light to red
-		 GPIO_ResetBits(GPIOC, GPIO_Pin_0 | GPIO_Pin_1 | GPIO_Pin_2);
-		 GPIO_SetBits(GPIOC, GPIO_Pin_0);
+	if(traffic_light_is_green()) {
+		//Set light to yellow
+		GPIO_ResetBits(GPIOC, GREEN_LIGHT_PIN);
+		GPIO_SetBits(GPIOC, YELLOW_LIGHT_PIN);
 
-		 //Change timer period
-		 //xTimerChangePeriod( xTimer, pdMS_TO_TICKS(8000/(potentiometer_val+1)), 1000);
-		 xTimerChangePeriod( xTimer, pdMS_TO_TICKS(100000), 1000);
+		//Set timer period to 3 seconds
+		int ms_to_delay = 3000;
 
-		 //printf("Red\n");
-	}else if(GPIO_ReadInputDataBit(GPIOC, GPIO_Pin_2)){ // traffic light is green
-		 //Set light to yellow
-		 GPIO_ResetBits(GPIOC, GPIO_Pin_0 | GPIO_Pin_1 | GPIO_Pin_2);
-		 GPIO_SetBits(GPIOC, GPIO_Pin_1);
+		xTimerChangePeriod( xTimer, pdMS_TO_TICKS(ms_to_delay), 1000);
 
-		 // Set to constant yellow light period
-		 xTimerChangePeriod( xTimer, pdMS_TO_TICKS(1000), 1000);
+		printf("Traffic Light Changed to Yellow\n");
+	} else if(traffic_light_is_yellow()) {
+		//Set light to red
+		GPIO_ResetBits(GPIOC, YELLOW_LIGHT_PIN);
+		GPIO_SetBits(GPIOC, RED_LIGHT_PIN);
 
-		 //printf("Yellow\n");
+		//Set timer period to be inverse proportional to potentiometer value
+		//When potentiometer value is 0, timer period is 2 seconds
+		//When potentiometer value is 100, timer period is 1 second
+		int ms_to_delay = 2000 - potentiometer_val*10;
+
+
+		printf("Traffic Light Changed to Red\n");
+	} else if (traffic_light_is_red()) {
+		//Set light to green
+		GPIO_ResetBits(GPIOC, RED_LIGHT_PIN);
+		GPIO_SetBits(GPIOC, GREEN_LIGHT_PIN);
+
+		//Set timer period to be proportional to potentiometer value
+		//When potentiometer value is 0, timer period is 1 second
+		//When potentiometer value is 100, timer period is 2 seconds
+		int ms_to_delay = 1000 + potentiometer_val*10;
+
+		printf("Traffic Light Changed to Green\n");
 	} else {
-		printf("No light state (error)\n");
+		printf("Traffic Light Error\n");
 	}
 }
 
 
 
 /*-----------------------------------------------------------*/
-
-void update_traffic_display(int traffic_pos[19])
+/*
+ * Update Traffic Display Task
+ * Description: task that updates the traffic display based on the car array
+ * Input: int traffic_pos[NUM_CAR_SPOTS] - array of car positions
+ * Output: void
+ */
+#define NUM_CAR_SPOTS 19
+#define STOP_POSITION 9	//Position where cars should stop if light turns yellow
+#define YELLOW_LIGHT_POSITION 6	//Position where light turns yellow
+void update_traffic_display(int traffic_pos[NUM_CAR_SPOTS])
 {
-
+	//Reset all the car spots
 	GPIO_ResetBits(GPIOC, Reset_Pin);
 	GPIO_SetBits(GPIOC, Reset_Pin);
 
-	for(int i=18; i>=0; i--)
-	{
+	for(int i=NUM_CAR_SPOTS-1; i>=0; --i) {
+		//If there is a car in the spot, set the data pin high
 		if(traffic_pos[i]){
 			GPIO_SetBits(GPIOC, Data_Pin);
 		}
 		GPIO_SetBits(GPIOC, Clock_Pin);
 		GPIO_ResetBits(GPIOC, Data_Pin | Clock_Pin);
 	}
-
 }
 
-int traffic_light_is_green()
-{
-	return GPIO_ReadInputDataBit(GPIOC, GPIO_Pin_2);
-}
-
-
+/*-----------------------------------------------------------*/
+/*
+ * System Display Task
+ * Description: task that updates the system display based on the traffic light state and the car queue.
+ * Input: void *pvParameters - pointer to parameters
+ * Output: void
+ */
 static void System_Display_Task( void *pvParameters )
 {
 	int new_car_val = 0;
 	int traffic_pos[19] = {};
-	while(1)
-	{
-		if(xQueueReceive(xQueue_car_generation, &new_car_val, 1000)){ // Update traffic
+
+	for(;;)
+		if(xQueueReceive(xQueue_car_generation, &new_car_val, 1000)) { // Update traffic
 
 			// Start with traffic beyond stop line, always shift
-			for(int i=18; i>=9; i--){
+			for(int i=NUM_CAR_SPOTS-1; i>=STOP_POSITION; --i) {
 				traffic_pos[i] = traffic_pos[i-1];
 			}
+
+			// Traffic past yellow light position can go if light is yellow
+			if(traffic_light_is_yellow()) {
+				for (int i=STOP_POSITION-1; i>=YELLOW_LIGHT_POSITION; --i) {
+					traffic_pos[i] = traffic_pos[i-1];
+				}
+			}
+
 			// Traffic at stop line, shift when traffic light is green
 			if(traffic_light_is_green()){
-				for(int i=8; i>=1; i--){
+				for(int i=YELLOW_LIGHT_POSITION-1; i>=1; --i) {
 					traffic_pos[i] = traffic_pos[i-1];
 				}
 				traffic_pos[0] = 0;
-			} else{ // shift only up to stop line
-				for(int i=6; i>=0; i--){
-					if(!traffic_pos[i+1]){ // can only shift forward if no traffic in front
-						traffic_pos[i+1] = traffic_pos[i];
-						traffic_pos[i] = 0;
-					}
-				}
-			}
+			} 
+			//else { // shift only up to stop line
+			//	for(int i=6; i>=0; i--){
+			//		if(!traffic_pos[i+1]){ // can only shift forward if no traffic in front
+			//			traffic_pos[i+1] = traffic_pos[i];
+			//			traffic_pos[i] = 0;
+			//		}
+			//	}
+			}//
 
-			// Add new car value if no traffic jam
-			if(!traffic_pos[0]){
-				traffic_pos[0] = new_car_val;
-			}
+			// Add new car value if no traffic jam and new car value is 1
+			traffic_pos[0] = new_car_val && !traffic_pos[0];
 		}
 		update_traffic_display(traffic_pos);
 	}
