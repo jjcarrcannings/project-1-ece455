@@ -97,14 +97,17 @@ starting the scheduler.
 /*-----------------------------------------------------------*/
 #define mainQUEUE_LENGTH 100
 
-#define GREEN_LIGHT_PIN GPIO_Pin_0
+#define RED_LIGHT_PIN GPIO_Pin_0
 #define YELLOW_LIGHT_PIN GPIO_Pin_1
-#define RED_LIGHT_PIN GPIO_Pin_2
+#define GREEN_LIGHT_PIN GPIO_Pin_2
 #define ADC_PIN GPIO_Pin_3
 
 #define Data_Pin	GPIO_Pin_6
 #define Clock_Pin	GPIO_Pin_7
 #define Reset_Pin	GPIO_Pin_8
+
+#define NUM_CAR_SPOTS 19
+#define STOP_POSITION 8	//Position where cars should stop if light turns yellow
 
 #undef configUSE_TICK_HOOK
 #define configUSE_TICK_HOOK 1
@@ -148,11 +151,11 @@ int init(void){
 	//Configure GPIO traffic light pins
 	gpio_traffic_light.GPIO_Mode = GPIO_Mode_OUT;
 	gpio_traffic_light.GPIO_OType = GPIO_OType_PP;
-	gpio_traffic_light.GPIO_Pin = 
+	gpio_traffic_light.GPIO_Pin =
 		GREEN_LIGHT_PIN | YELLOW_LIGHT_PIN | RED_LIGHT_PIN | Data_Pin | Clock_Pin | Reset_Pin;
 	gpio_traffic_light.GPIO_PuPd = GPIO_PuPd_DOWN;
 	gpio_traffic_light.GPIO_Speed = GPIO_Speed_100MHz;
-	
+
 	//Configure GPIO ADC pin
 	gpio_adc.GPIO_Mode = GPIO_Mode_AN;
 	gpio_adc.GPIO_Pin = ADC_PIN;
@@ -162,6 +165,9 @@ int init(void){
 	//Initialize GPIOC for traffic light and ADC pins
 	GPIO_Init(GPIOC, &gpio_traffic_light);
 	GPIO_Init(GPIOC, &gpio_adc);
+
+	//Initialize traffic light to green
+	GPIO_SetBits(GPIOC, GREEN_LIGHT_PIN);
 
 	//Configure ADC
 	adc_itd.ADC_ContinuousConvMode = 0;
@@ -176,20 +182,6 @@ int init(void){
 
 	ADC_Cmd(ADC1, ENABLE);
 	ADC_SoftwareStartConv(ADC1);
-
-	/*//Create timer
-	TimerHandle_t timer_handle = xTimerCreate("Traffic Light Timer", 1000, pdTRUE, NULL, Traffic_Light_State_Task);
-	if(timer_handle == NULL) {
-		fprintf(stderr, "Timer not created\n");
-		return 1;
-	}
-
-	//Start timer
-	if(xTimerStart( timer_handle, 0 ) != pdPASS )
-	{
-		printf("The timer could not be set into the Active state.\n");
-		return 2;
-	}*/
 
 
 	//Provide seed for random number generator
@@ -270,7 +262,7 @@ static void Potentiometer_Read_Task( void *pvParameters )
 		adc_val = ADC_GetConversionValue(ADC1) / 10;
 
 		//Pop old value of the queue
-		xQueueReceive(xQueue_potentiometer, NULL, 10);
+		xQueueReceive(xQueue_potentiometer, &old_adc_val, 10);
 
 		//Send new adc value into the queue (value not used)
 		xQueueSend(xQueue_potentiometer,&adc_val,1000);
@@ -285,31 +277,34 @@ static void Potentiometer_Read_Task( void *pvParameters )
 /*
  * Traffic Generator Task
  * Description: Reads potentiometer value from queue, and then uses that value in addition to a
- * random number to determine whether a car should be generated. The higher the value of the 
+ * random number to determine whether a car should be generated. The higher the value of the
  * potentiometer, the more likely a car will be generated.
  * Input: void *pvParameters - pointer to parameters
  * Output: void
  */
 static void  Traffic_Generator_Task( void *pvParameters )
 {
+	const int POTENTIOMETER_ERR = 3;
 	uint16_t potentiometer_val = 0;
 	for(;;) {
 		//Read potentiometer value from queue
 		xQueuePeek(xQueue_potentiometer, &potentiometer_val, 1000);
-		
+
 		//Shift the potentiometer value up by 20 and scale so that max stays at 100
-		potentiometer_val += 20;
-		potentiometer_val = (int)((double)potentiometer_val/1.2);
+		//potentiometer_val += 20;
+		//potentiometer_val = (int)((double)potentiometer_val/1.2);
+		potentiometer_val = 0.8*potentiometer_val + 20;
 
 		//Generate random number between 0 and 100
 		int rand_val = (rand()*100.0) / RAND_MAX;
 		printf("rand: %d --- adc: %u \n", rand_val, potentiometer_val);
-		
+
 		//If random number is greater than potentiometer value, generate car
 		//By sending a 1 to the queue, the car generation task will generate a car
 		//If random number is less than potentiometer value, do not generate car
 		//By sending a 0 to the queue, the car generation task will not generate a car
-		if(rand_val <= potentiometer_val) { //Create new car
+
+		if(rand_val <= potentiometer_val+POTENTIOMETER_ERR) { //Create new car
 			//Send car to new queue
 			int new_car_val = 1;
 			xQueueSend(xQueue_car_generation, &new_car_val, 1000);
@@ -332,6 +327,7 @@ static void  Traffic_Generator_Task( void *pvParameters )
  */
 void Traffic_Light_State_Task( TimerHandle_t xTimer ) {
 	uint16_t potentiometer_val = 0;
+	int ms_to_delay = 1500;
 
 	//Read potentiometer value from queue
 	xQueuePeek(xQueue_potentiometer, &potentiometer_val, 1000);
@@ -342,29 +338,24 @@ void Traffic_Light_State_Task( TimerHandle_t xTimer ) {
 	//If the potentiometer value is 0, the red light should be on twice as long as the green light
 	//If the potentiometer value is 100, the green light should be on twice as long as the red light
 
-	xTimerChangePeriod( xTimer, pdMS_TO_TICKS(ms_to_delay), 1000);
-
 	if(traffic_light_is_green()) {
 		//Set light to yellow
 		GPIO_ResetBits(GPIOC, GREEN_LIGHT_PIN);
 		GPIO_SetBits(GPIOC, YELLOW_LIGHT_PIN);
 
-		//Set timer period to 3 seconds
-		int ms_to_delay = 3000;
-
-		xTimerChangePeriod( xTimer, pdMS_TO_TICKS(ms_to_delay), 1000);
-
+		//Set timer period to 1.5 seconds
+		ms_to_delay = 1500;
 		printf("Traffic Light Changed to Yellow\n");
+
 	} else if(traffic_light_is_yellow()) {
 		//Set light to red
 		GPIO_ResetBits(GPIOC, YELLOW_LIGHT_PIN);
 		GPIO_SetBits(GPIOC, RED_LIGHT_PIN);
 
 		//Set timer period to be inverse proportional to potentiometer value
-		//When potentiometer value is 0, timer period is 2 seconds
-		//When potentiometer value is 100, timer period is 1 second
-		int ms_to_delay = 2000 - potentiometer_val*10;
-
+		//When potentiometer value is 0, timer period is 5 seconds
+		//When potentiometer value is 100, timer period is 2.5 second
+		ms_to_delay = 5000 - potentiometer_val*25;
 
 		printf("Traffic Light Changed to Red\n");
 	} else if (traffic_light_is_red()) {
@@ -373,28 +364,26 @@ void Traffic_Light_State_Task( TimerHandle_t xTimer ) {
 		GPIO_SetBits(GPIOC, GREEN_LIGHT_PIN);
 
 		//Set timer period to be proportional to potentiometer value
-		//When potentiometer value is 0, timer period is 1 second
-		//When potentiometer value is 100, timer period is 2 seconds
-		int ms_to_delay = 1000 + potentiometer_val*10;
+		//When potentiometer value is 0, timer period is 2.5 second
+		//When potentiometer value is 100, timer period is 5 seconds
+		ms_to_delay = 2500 + potentiometer_val*25;
 
 		printf("Traffic Light Changed to Green\n");
 	} else {
 		printf("Traffic Light Error\n");
 	}
+	xTimerChangePeriod( xTimer, pdMS_TO_TICKS(ms_to_delay), 1000);
 }
 
 
 
 /*-----------------------------------------------------------*/
 /*
- * Update Traffic Display Task
- * Description: task that updates the traffic display based on the car array
+ * Update Traffic Display
+ * Description: updates the traffic display based on the car array
  * Input: int traffic_pos[NUM_CAR_SPOTS] - array of car positions
  * Output: void
  */
-#define NUM_CAR_SPOTS 19
-#define STOP_POSITION 9	//Position where cars should stop if light turns yellow
-#define YELLOW_LIGHT_POSITION 6	//Position where light turns yellow
 void update_traffic_display(int traffic_pos[NUM_CAR_SPOTS])
 {
 	//Reset all the car spots
@@ -421,43 +410,52 @@ void update_traffic_display(int traffic_pos[NUM_CAR_SPOTS])
 static void System_Display_Task( void *pvParameters )
 {
 	int new_car_val = 0;
-	int traffic_pos[19] = {};
+	int traffic_pos[NUM_CAR_SPOTS] = {};
 
-	for(;;)
-		if(xQueueReceive(xQueue_car_generation, &new_car_val, 1000)) { // Update traffic
+	for(;;) {
+		if(xQueueReceive(xQueue_car_generation, &new_car_val, 1000)){ // Update traffic
 
 			// Start with traffic beyond stop line, always shift
-			for(int i=NUM_CAR_SPOTS-1; i>=STOP_POSITION; --i) {
+			for(int i=NUM_CAR_SPOTS-1; i>STOP_POSITION; --i){
 				traffic_pos[i] = traffic_pos[i-1];
 			}
-
-			// Traffic past yellow light position can go if light is yellow
-			if(traffic_light_is_yellow()) {
-				for (int i=STOP_POSITION-1; i>=YELLOW_LIGHT_POSITION; --i) {
-					traffic_pos[i] = traffic_pos[i-1];
-				}
-			}
+			traffic_pos[STOP_POSITION] = 0;
 
 			// Traffic at stop line, shift when traffic light is green
 			if(traffic_light_is_green()){
-				for(int i=YELLOW_LIGHT_POSITION-1; i>=1; --i) {
+				for(int i=STOP_POSITION; i>0; --i){
 					traffic_pos[i] = traffic_pos[i-1];
 				}
 				traffic_pos[0] = 0;
-			} 
-			//else { // shift only up to stop line
-			//	for(int i=6; i>=0; i--){
-			//		if(!traffic_pos[i+1]){ // can only shift forward if no traffic in front
-			//			traffic_pos[i+1] = traffic_pos[i];
-			//			traffic_pos[i] = 0;
-			//		}
-			//	}
-			}//
+			} else{ // shift only up to stop line
+				//If light is yellow or red go here
 
-			// Add new car value if no traffic jam and new car value is 1
-			traffic_pos[0] = new_car_val && !traffic_pos[0];
+				for(int i=STOP_POSITION-2; i>=0; i--){
+					if(!traffic_pos[i+1]){ // can only shift forward if no traffic in front
+						traffic_pos[i+1] = traffic_pos[i];
+						traffic_pos[i] = 0;
+					}
+				}
+			}
+
+			// Add new car value if no traffic jam
+			if(!traffic_pos[0]){
+				traffic_pos[0] = new_car_val;
+			}
 		}
-		update_traffic_display(traffic_pos);
+		//update_traffic_display(traffic_pos);
+		//Reset all the car spots
+		GPIO_ResetBits(GPIOC, Reset_Pin);
+		GPIO_SetBits(GPIOC, Reset_Pin);
+
+		for(int i=NUM_CAR_SPOTS-1; i>=0; --i) {
+			//If there is a car in the spot, set the data pin high
+			if(traffic_pos[i]){
+				GPIO_SetBits(GPIOC, Data_Pin);
+			}
+			GPIO_SetBits(GPIOC, Clock_Pin);
+			GPIO_ResetBits(GPIOC, Data_Pin | Clock_Pin);
+		}
 	}
 }
 
